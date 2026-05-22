@@ -28,7 +28,21 @@ npx serve .
 
 ## 動作環境
 
-- Chrome または Edge（Web Speech API 対応ブラウザ）
+各 API に対応したブラウザが必要です。未対応の場合、画面上にエラーが表示され該当機能は利用できません。
+
+| 機能 | 対応ブラウザ |
+|------|------------|
+| 文字起こし（Web Speech API） | Chrome、Edge |
+| 翻訳（Chrome Translation API） | デスクトップ版 Chrome 131 以降（要フラグ有効化） |
+
+> **モバイル非対応：** Chrome Translation API はデスクトップ専用のため、モバイルでは翻訳機能が利用できません。
+
+### Chrome Translation API の有効化
+
+`chrome://flags` で以下を **Enabled** に設定してください。
+
+- `Translator API`
+- `Translator API for Localhost`（ローカル開発時）
 
 ## ファイル構成
 
