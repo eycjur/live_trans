@@ -27,7 +27,8 @@
             font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
             background: var(--bg);
             color: var(--text);
-            min-height: 100vh;
+            height: 100vh;
+            overflow: hidden;
             display: flex;
             flex-direction: column;
         }
@@ -107,6 +108,7 @@
         /* ── Main ── */
         main {
             flex: 1;
+            min-height: 0;
             display: flex;
             flex-direction: column;
             max-width: 860px;
@@ -114,6 +116,7 @@
             margin: 0 auto;
             padding: 1.25rem 1.5rem 2rem;
             position: relative;
+            overflow: hidden;
         }
 
         /* ── Alerts ── */
@@ -239,13 +242,13 @@
         /* ── Transcript view ── */
         .transcript-wrap {
             flex: 1;
+            min-height: 0;
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 14px;
             overflow: hidden;
             backdrop-filter: blur(10px);
             display: flex; flex-direction: column;
-            min-height: 400px;
         }
 
         .transcript-header {
@@ -297,13 +300,8 @@
             to   { opacity: 1; transform: translateY(0); }
         }
 
-        .seg-block.interim {
-            opacity: 0.5;
-        }
-
         .seg-block.interim::before {
             background: var(--text-muted);
-            opacity: 0.3;
         }
 
         .seg-time {
@@ -755,6 +753,7 @@ function addSegment(enText) {
     segments.push({ id, en: enText, ja: null, time });
 
     const scroll = document.getElementById('transcriptScroll');
+    const atBottom = isAtBottom();
     const el = document.createElement('div');
     el.className = 'seg-block';
     el.id = `seg-${id}`;
@@ -766,16 +765,17 @@ function addSegment(enText) {
         scroll.appendChild(el);
     }
     updateCount();
-    scrollToBottom();
+    if (atBottom) scrollToBottom();
 
     // Translate async, update just the ja line when done
     translateText(enText).then(ja => {
         segments.find(s => s.id === id).ja = ja;
         const jaEl = document.getElementById(`seg-ja-${id}`);
+        const atBottomNow = isAtBottom();
         if (jaEl) jaEl.innerHTML = ja.startsWith('[翻訳エラー')
             ? `<span style="color:var(--warning)">${esc(ja)}</span>`
             : esc(ja);
-        scrollToBottom();
+        if (atBottomNow) scrollToBottom();
     });
 }
 
@@ -796,13 +796,14 @@ function setInterim(text) {
         return;
     }
     hideEmptyState();
+    const atBottom = isAtBottom(); // DOM 変更前に取得
     if (!interimEl) {
         interimEl = document.createElement('div');
         interimEl.className = 'seg-block interim';
         scroll.appendChild(interimEl);
     }
     interimEl.innerHTML = `<div class="seg-en interim-text">${esc(text)}</div>`;
-    scrollToBottom();
+    if (atBottom) scrollToBottom();
 }
 
 function updateCount() {
@@ -814,11 +815,14 @@ function hideEmptyState() {
     if (es) es.style.display = 'none';
 }
 
+function isAtBottom() {
+    const scroll = document.getElementById('transcriptScroll');
+    return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 10;
+}
+
 function scrollToBottom() {
     const scroll = document.getElementById('transcriptScroll');
-    // Only auto-scroll if already near the bottom (within 120px)
-    const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
-    if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
+    scroll.scrollTop = scroll.scrollHeight;
 }
 
 /* ─────────────────────────────────────────────
@@ -925,7 +929,8 @@ function buildRecognition() {
 
     recognition.onend = () => {
         if (!isRecording) return;
-        const delay = networkErrCount > 0 ? 2000 : 200;
+        // ネットワークエラー時は 2s 待機、通常は即座に再起動（0ms だと Chrome が拒否する場合があるため 10ms）
+        const delay = networkErrCount > 0 ? 2000 : 10;
         setTimeout(() => { if (isRecording) recognition.start(); }, delay);
     };
 }
