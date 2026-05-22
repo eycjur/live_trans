@@ -438,7 +438,6 @@
 ───────────────────────────────────────────── */
 
 let translatorInstance = null;
-let useChrome = false;
 let currentLang = 'ja';
 
 const LANG_LABELS = {
@@ -449,15 +448,19 @@ const LANG_LABELS = {
 
 async function initTranslationEngine(lang) {
     translatorInstance = null;
-    useChrome = false;
 
-    if (!('translation' in window)) { setFallbackEngine(); return; }
+    if (!('translation' in window)) {
+        showBadgeError();
+        showWarning('このブラウザは Chrome Translation API に対応していません。Chrome を使用してください。');
+        return;
+    }
 
     try {
         const status = await window.translation.canTranslate({ sourceLanguage:'en', targetLanguage:lang });
 
         if (status === 'no') {
-            setFallbackEngine(`Chrome AI は "${LANG_LABELS[lang]}" をサポートしていません。MyMemory を使用します。`);
+            showBadgeError();
+            showWarning(`Chrome AI は "${LANG_LABELS[lang]}" をサポートしていません。`);
             return;
         }
 
@@ -480,41 +483,35 @@ async function initTranslationEngine(lang) {
         });
 
         document.getElementById('downloadProgress').style.display = 'none';
-        useChrome = true;
         const b = document.getElementById('engineBadge');
         b.textContent = '✓ Chrome AI'; b.className = 'engine-badge chrome';
         hideAlerts();
 
     } catch (err) {
         console.warn('Chrome Translation API:', err);
-        setFallbackEngine(`Chrome AI 初期化失敗 (${err.message})。MyMemory を使用します。`);
+        showBadgeError();
+        showWarning(`Chrome AI 初期化失敗 (${err.message})。`);
     }
 }
 
-function setFallbackEngine(msg) {
-    useChrome = false; translatorInstance = null;
+function showBadgeError() {
+    translatorInstance = null;
     const b = document.getElementById('engineBadge');
-    b.textContent = '⚠ MyMemory (上限あり)'; b.className = 'engine-badge fallback';
-    if (msg) showWarning(msg);
+    b.textContent = '✗ 翻訳不可'; b.className = 'engine-badge fallback';
 }
 
 async function translateText(text) {
     if (!text.trim()) return '';
-    if (useChrome && translatorInstance) {
+    if (translatorInstance) {
         try { return await translatorInstance.translate(text); }
         catch (err) {
             console.error('Chrome translate:', err);
-            setFallbackEngine('Chrome AI エラー。MyMemory に切り替えます。');
+            showBadgeError();
+            showWarning('Chrome AI エラーが発生しました。');
+            return `[翻訳エラー: ${err.message}]`;
         }
     }
-    try {
-        const res  = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${currentLang}&de=eycjur@gmail.com`);
-        const data = await res.json();
-        if (data.responseStatus === 200) return data.responseData.translatedText;
-        throw new Error(data.responseDetails || 'failed');
-    } catch (err) {
-        return `[翻訳エラー: ${err.message}]`;
-    }
+    return '[翻訳エラー: Chrome Translation API が利用できません]';
 }
 
 /* ─────────────────────────────────────────────
