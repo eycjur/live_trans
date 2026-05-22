@@ -148,6 +148,18 @@
             border-radius: 2px; width: 0%; transition: width 0.3s;
         }
 
+        /* 進捗イベントが来ない場合の不確定アニメーション */
+        @keyframes progress-indeterminate {
+            0%   { transform: translateX(-100%); width: 45%; }
+            100% { transform: translateX(280%);  width: 45%; }
+        }
+
+        .progress-bar-fill.indeterminate {
+            width: 45% !important;
+            transition: none;
+            animation: progress-indeterminate 1.6s ease-in-out infinite;
+        }
+
         /* ── Controls ── */
         .controls {
             display: flex; align-items: center; gap: 0.75rem;
@@ -375,7 +387,15 @@
     <div class="alert info"    id="alertInfo"></div>
 
     <div class="download-progress" id="downloadProgress">
-        <span id="downloadLabel">翻訳モデルをダウンロード中...</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;">
+            <span id="downloadLabel">翻訳モデルをダウンロード中...</span>
+            <button id="downloadTriggerBtn" onclick="triggerModelDownload()"
+                    style="display:none;padding:0.3rem 0.85rem;border-radius:8px;
+                           background:rgba(99,102,241,0.25);border:1px solid rgba(99,102,241,0.5);
+                           color:#a5b4fc;font-size:0.8rem;cursor:pointer;white-space:nowrap;">
+                ダウンロード開始
+            </button>
+        </div>
         <div class="progress-bar-wrap">
             <div class="progress-bar-fill" id="progressFill"></div>
         </div>
@@ -446,52 +466,257 @@ const LANG_LABELS = {
     pt:'🇵🇹 ポルトガル語', ru:'🇷🇺 ロシア語'
 };
 
+function getBrowserInfo() {
+    const ua = navigator.userAgent;
+    const edge    = /Edg\/(\d+)/.exec(ua);
+    const chrome  = /Chrome\/(\d+)/.exec(ua);
+    const firefox = /Firefox\/(\d+)/.exec(ua);
+    const safari  = /Version\/(\d+).+Safari/.exec(ua);
+    if (edge)    return `Edge ${edge[1]}`;
+    if (chrome)  return `Chrome ${chrome[1]}`;
+    if (firefox) return `Firefox ${firefox[1]}`;
+    if (safari)  return `Safari ${safari[1]}`;
+    return 'Unknown';
+}
+
 async function initTranslationEngine(lang) {
     translatorInstance = null;
 
-    if (!('translation' in window)) {
+    // Chrome 141+: Translator global (self)  /  Chrome 122-130: window.translation
+    const hasModern = 'Translator' in self;
+    const hasLegacy = 'translation' in window;
+
+    console.group('%c[VoiceTranslate] 翻訳エンジン初期化', 'color:#6366f1;font-weight:bold');
+    console.log('ブラウザ               :', getBrowserInfo());
+    console.log('プロトコル             :', location.protocol);
+    console.log('対象言語               :', lang, LANG_LABELS[lang] ?? '');
+    console.log('Translator (Chrome141+):', hasModern ? '✓ あり' : '✗ なし');
+    console.log('window.translation     :', hasLegacy ? '✓ あり (旧API)' : '✗ なし');
+    console.log('▶ フラグ確認           : chrome://flags/ で "translation" を検索');
+    console.log('▶ 言語パック確認       : chrome://on-device-translation-internals/');
+
+    if (!hasModern && !hasLegacy) {
+        console.warn(
+            'Chrome Translation API が見つかりません。確認手順:\n' +
+            '  1. chrome://flags/ で "translation" を検索し Enabled に設定\n' +
+            '  2. Chrome を再起動\n' +
+            '  3. chrome://on-device-translation-internals/ で言語パックをインストール'
+        );
+        console.groupEnd();
         showBadgeError();
-        showWarning('このブラウザは Chrome Translation API に対応していません。Chrome を使用してください。');
+        const br = getBrowserInfo();
+        showWarning(
+            `Chrome Translation API が利用できません (${br})。` +
+            ' ① chrome://flags/ で "translation" を検索して Enabled → 再起動。' +
+            ' ② chrome://on-device-translation-internals/ で言語パックをインストール。'
+        );
         return;
     }
 
-    try {
-        const status = await window.translation.canTranslate({ sourceLanguage:'en', targetLanguage:lang });
+    if (hasModern) {
+        try {
+            const avail = await Translator.availability({ sourceLanguage: 'en', targetLanguage: lang });
+            console.log(`Translator.availability(en→${lang}):`, avail);
 
-        if (status === 'no') {
-            showBadgeError();
-            showWarning(`Chrome AI は "${LANG_LABELS[lang]}" をサポートしていません。`);
-            return;
-        }
-
-        if (status === 'after-download') {
-            document.getElementById('downloadProgress').style.display = 'block';
-            showInfo('翻訳モデルを初回ダウンロードします...');
-        }
-
-        translatorInstance = await window.translation.createTranslator({
-            sourceLanguage: 'en', targetLanguage: lang,
-            monitor(m) {
-                m.addEventListener('downloadprogress', e => {
-                    if (e.total) {
-                        const pct = Math.round(e.loaded / e.total * 100);
-                        document.getElementById('progressFill').style.width = pct + '%';
-                        document.getElementById('downloadLabel').textContent = `翻訳モデルをダウンロード中... ${pct}%`;
-                    }
-                });
+            if (avail === 'unavailable') {
+                console.warn(`言語ペア en→${lang} はサポートされていません`);
+                console.groupEnd();
+                showBadgeError();
+                showWarning(`Chrome AI は "${LANG_LABELS[lang]}" をサポートしていません。別の言語を選んでください。`);
+                return;
             }
-        });
 
-        document.getElementById('downloadProgress').style.display = 'none';
-        const b = document.getElementById('engineBadge');
-        b.textContent = '✓ Chrome AI'; b.className = 'engine-badge chrome';
-        hideAlerts();
+            if (avail === 'downloadable' || avail === 'downloading') {
+                // Translator.create() はユーザージェスチャーが必要なためボタンで委譲する
+                console.log(`avail="${avail}": Translator.create() にはユーザー操作が必要。ダウンロードボタンを表示します。`);
+                console.groupEnd();
+                showDownloadPrompt(lang, avail);
+                return;
+            }
 
-    } catch (err) {
-        console.warn('Chrome Translation API:', err);
-        showBadgeError();
-        showWarning(`Chrome AI 初期化失敗 (${err.message})。`);
+            // avail === 'available': モデル準備済み、ジェスチャー不要で即座に作成可能
+            console.log('モデル準備済み。Translator.create() を実行します。');
+            console.groupEnd();
+            await _initModernTranslator(lang);
+
+        } catch (err) {
+            document.getElementById('downloadProgress').style.display = 'none';
+            console.error('翻訳エンジン初期化エラー:', err);
+            console.error('  name   :', err.name);
+            console.error('  message:', err.message);
+            console.groupEnd();
+            showBadgeError();
+            showWarning(`Chrome AI 初期化失敗 — ${err.name}: ${err.message}`);
+        }
+        return;
     }
+
+    // Legacy API (Chrome 122-130)
+    try {
+        await _initLegacyTranslator(lang);
+    } catch (err) {
+        document.getElementById('downloadProgress').style.display = 'none';
+        console.error('翻訳エンジン初期化エラー:', err);
+        console.error('  name   :', err.name);
+        console.error('  message:', err.message);
+        console.groupEnd();
+        showBadgeError();
+        showWarning(`Chrome AI 初期化失敗 — ${err.name}: ${err.message}`);
+    }
+}
+
+let pendingDownloadLang = null;
+
+function showDownloadPrompt(lang, avail) {
+    pendingDownloadLang = lang;
+    const b = document.getElementById('engineBadge');
+    b.textContent = '⬇ 要インストール'; b.className = 'engine-badge fallback';
+    document.getElementById('downloadProgress').style.display = 'block';
+    document.getElementById('downloadLabel').textContent =
+        `翻訳モデルが未インストールです。` +
+        ` chrome://on-device-translation-internals/ で "en" と "${lang}" の言語パックをインストール後、` +
+        ` 下のボタンをクリックしてください。`;
+    const btn = document.getElementById('downloadTriggerBtn');
+    btn.textContent = 'インストール済み — 再確認';
+    btn.style.display = 'inline-block';
+}
+
+async function triggerModelDownload() {
+    if (!pendingDownloadLang) return;
+    const lang = pendingDownloadLang;
+    pendingDownloadLang = null;
+    document.getElementById('downloadTriggerBtn').style.display = 'none';
+    console.log('[VoiceTranslate] ユーザー操作でダウンロード開始:', lang);
+    try {
+        await _initModernTranslator(lang);
+    } catch (err) {
+        console.error('ダウンロードエラー:', { name: err.name, message: err.message });
+        showBadgeError();
+        if (err.name === 'NotSupportedError') {
+            // 言語パックが未インストール → ボタンを再表示してリトライ案内
+            pendingDownloadLang = lang;
+            document.getElementById('downloadProgress').style.display = 'block';
+            document.getElementById('progressFill').style.width = '0%';
+            document.getElementById('downloadLabel').textContent =
+                `言語パックが見つかりません。` +
+                ` chrome://on-device-translation-internals/ で "en" と "${lang}" の両方をインストール後、` +
+                ` 再度ボタンをクリックしてください。`;
+            const btn = document.getElementById('downloadTriggerBtn');
+            btn.textContent = 'インストール済み — 再確認';
+            btn.style.display = 'inline-block';
+        } else if (err.name === 'TimeoutError') {
+            document.getElementById('downloadProgress').style.display = 'none';
+            showWarning(
+                'ダウンロードがタイムアウトしました。' +
+                ' chrome://on-device-translation-internals/ で言語パックのインストール状態を確認し、' +
+                ' 完了後にページを再読み込みしてください。'
+            );
+        } else {
+            document.getElementById('downloadProgress').style.display = 'none';
+            showWarning(`Chrome AI ダウンロード失敗 — ${err.name}: ${err.message}`);
+        }
+    }
+}
+
+async function _initModernTranslator(lang) {
+    // この時点では avail === 'available' or ユーザージェスチャー後のダウンロード開始
+    document.getElementById('downloadProgress').style.display = 'block';
+    document.getElementById('progressFill').classList.add('indeterminate');
+    document.getElementById('downloadLabel').textContent = '翻訳モデルを初期化中... (数分かかる場合があります)';
+
+    const hintTimer = setTimeout(() => {
+        if (document.getElementById('downloadProgress').style.display !== 'none') {
+            console.warn('20秒経過。chrome://on-device-translation-internals/ での確認を推奨');
+            document.getElementById('downloadLabel').textContent =
+                'ダウンロードに時間がかかっています...' +
+                ' chrome://on-device-translation-internals/ でパックのインストール状態を確認してください。';
+        }
+    }, 20000);
+
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(
+            () => reject(new DOMException('90秒でタイムアウトしました', 'TimeoutError')),
+            90000
+        );
+    });
+
+    try {
+        translatorInstance = await Promise.race([
+            Translator.create({
+                sourceLanguage: 'en', targetLanguage: lang,
+                monitor(m) {
+                    m.addEventListener('downloadprogress', e => {
+                        console.log(`  downloadprogress: loaded=${e.loaded}, total=${e.total}`);
+                        const fill = document.getElementById('progressFill');
+                        if (e.total) {
+                            fill.classList.remove('indeterminate');
+                            const pct = Math.round(e.loaded / e.total * 100);
+                            fill.style.width = pct + '%';
+                            document.getElementById('downloadLabel').textContent =
+                                `翻訳モデルをダウンロード中... ${pct}%`;
+                        } else if (e.loaded) {
+                            const mb = (e.loaded / 1024 / 1024).toFixed(1);
+                            document.getElementById('downloadLabel').textContent =
+                                `翻訳モデルをダウンロード中... ${mb} MB`;
+                        }
+                    });
+                }
+            }),
+            timeoutPromise
+        ]);
+    } finally {
+        clearTimeout(hintTimer);
+        clearTimeout(timeoutId);
+        document.getElementById('progressFill').classList.remove('indeterminate');
+    }
+
+    _onTranslatorReady();
+}
+
+async function _initLegacyTranslator(lang) {
+    console.log('使用API: window.translation (旧API, Chrome 122-130)');
+    const status = await window.translation.canTranslate({ sourceLanguage: 'en', targetLanguage: lang });
+    console.log(`canTranslate(en→${lang}):`, status);
+
+    if (status === 'no') {
+        console.warn(`言語ペア en→${lang} はサポートされていません`);
+        console.groupEnd();
+        showBadgeError();
+        showWarning(`Chrome AI は "${LANG_LABELS[lang]}" をサポートしていません。別の言語を選んでください。`);
+        return;
+    }
+
+    if (status === 'after-download') {
+        console.log('モデルのダウンロードが必要です。ダウンロード開始...');
+        document.getElementById('downloadProgress').style.display = 'block';
+        showInfo('翻訳モデルを初回ダウンロードします...');
+    }
+
+    translatorInstance = await window.translation.createTranslator({
+        sourceLanguage: 'en', targetLanguage: lang,
+        monitor(m) {
+            m.addEventListener('downloadprogress', e => {
+                if (e.total) {
+                    const pct = Math.round(e.loaded / e.total * 100);
+                    console.log(`  ダウンロード: ${pct}%`);
+                    document.getElementById('progressFill').style.width = pct + '%';
+                    document.getElementById('downloadLabel').textContent = `翻訳モデルをダウンロード中... ${pct}%`;
+                }
+            });
+        }
+    });
+
+    _onTranslatorReady();
+}
+
+function _onTranslatorReady() {
+    document.getElementById('downloadProgress').style.display = 'none';
+    const b = document.getElementById('engineBadge');
+    b.textContent = '✓ Chrome AI'; b.className = 'engine-badge chrome';
+    hideAlerts();
+    console.log('初期化完了 ✓');
+    console.groupEnd();
 }
 
 function showBadgeError() {
@@ -505,12 +730,13 @@ async function translateText(text) {
     if (translatorInstance) {
         try { return await translatorInstance.translate(text); }
         catch (err) {
-            console.error('Chrome translate:', err);
+            console.error('[VoiceTranslate] 翻訳エラー:', { text, name: err.name, message: err.message });
             showBadgeError();
-            showWarning('Chrome AI エラーが発生しました。');
-            return `[翻訳エラー: ${err.message}]`;
+            showWarning(`Chrome AI 翻訳エラー — ${err.name}: ${err.message}`);
+            return `[翻訳エラー: ${err.name}]`;
         }
     }
+    console.warn('[VoiceTranslate] translatorInstance が未初期化です。Chrome Translation API を確認してください。');
     return '[翻訳エラー: Chrome Translation API が利用できません]';
 }
 
@@ -605,8 +831,31 @@ let isRecording     = false;
 let networkErrCount = 0;
 const NETWORK_ERR_MAX = 3;
 
+const SPEECH_ERROR_MESSAGES = {
+    'not-allowed':            'マイクのアクセスが拒否されました。ブラウザのアドレスバー横のアイコンからマイクを許可してください。',
+    'network':                'Googleの音声認識サーバーに接続できません。インターネット接続を確認してください。',
+    'audio-capture':          'マイクが検出されませんでした。マイクが正しく接続されているか確認してください。',
+    'service-not-allowed':    'このページでは音声認識が許可されていません。https または localhost でアクセスしてください。',
+    'language-not-supported': '指定した言語はサポートされていません。',
+    'bad-grammar':            '文法設定にエラーが発生しました。',
+    'aborted':                '音声認識が中断されました。',
+    'no-speech':              '音声が検出されませんでした（正常）。',
+};
+
+console.group('%c[VoiceTranslate] 起動時診断', 'color:#34d399;font-weight:bold');
+console.log('ブラウザ               :', getBrowserInfo());
+console.log('プロトコル             :', location.protocol);
+console.log('SpeechRecognition      :', SpeechRec ? '✓ あり' : '✗ なし');
+console.log('Translator (Chrome141+):', 'Translator' in self ? '✓ あり' : '✗ なし');
+console.log('window.translation     :', 'translation' in window ? '✓ あり (旧API)' : '✗ なし');
+console.log('MediaDevices API       :', navigator.mediaDevices ? '✓ あり' : '✗ なし');
+console.log('Secure Context         :', window.isSecureContext ? '✓ はい' : '✗ いいえ（file:// は非推奨）');
+console.log('▶ フラグ確認           : chrome://flags/ で "translation" を検索');
+console.log('▶ 言語パック確認       : chrome://on-device-translation-internals/');
+console.groupEnd();
+
 if (!SpeechRec) {
-    showError('このブラウザは Web Speech API に対応していません。Chrome または Edge を使用してください。');
+    showError(`Web Speech API が利用できません (${getBrowserInfo()})。Chrome または Edge を使用してください。`);
     document.getElementById('recordBtn').disabled = true;
 }
 
@@ -641,19 +890,36 @@ function buildRecognition() {
     };
 
     recognition.onerror = (e) => {
+        console.warn('[VoiceTranslate] 音声認識エラー:', {
+            error: e.error,
+            message: e.message || '(なし)',
+            networkErrCount,
+        });
+
         if (e.error === 'not-allowed') {
-            showError('マイクへのアクセスが拒否されました。ブラウザの設定でマイクを許可してください。');
+            showError(SPEECH_ERROR_MESSAGES['not-allowed']);
+            stopRecording();
+        } else if (e.error === 'audio-capture') {
+            showError(SPEECH_ERROR_MESSAGES['audio-capture']);
+            stopRecording();
+        } else if (e.error === 'service-not-allowed') {
+            showError(SPEECH_ERROR_MESSAGES['service-not-allowed']);
             stopRecording();
         } else if (e.error === 'network') {
             networkErrCount++;
             if (networkErrCount >= NETWORK_ERR_MAX) {
                 stopRecording();
-                showError(`ネットワークエラーが ${NETWORK_ERR_MAX} 回連続しました。インターネット接続か localhost 経由でのアクセスを確認してください。`);
+                showError(
+                    `ネットワークエラーが ${NETWORK_ERR_MAX} 回連続しました。` +
+                    SPEECH_ERROR_MESSAGES['network']
+                );
             } else {
                 setStatus('listening', `ネットワークエラー (${networkErrCount}/${NETWORK_ERR_MAX}) — 再接続中...`);
             }
-        } else if (e.error !== 'no-speech') {
+        } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+            const msg = SPEECH_ERROR_MESSAGES[e.error] ?? `不明なエラーコード: ${e.error}`;
             setStatus('idle', 'エラー: ' + e.error);
+            showWarning(msg);
         }
     };
 
